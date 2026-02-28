@@ -51,7 +51,6 @@ from .types import (
     _memory_device_t,
     _receptive_field_t,
 )
-from ....optimization.memory_manager import retry_on_oom
 
 logger = get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -132,20 +131,13 @@ class Upsample3D(Upsample2D):
             hidden_states = [hidden_states]
 
         for i in range(len(hidden_states)):
-            def upscale_and_rearrange():
-                temp = self.upscale_conv(hidden_states[i])
-                return rearrange(
-                    temp,
-                    "b (x y z c) f h w -> b c (f z) (h x) (w y)",
-                    x=self.spatial_ratio,
-                    y=self.spatial_ratio,
-                    z=self.temporal_ratio,
-                )
-            
-            hidden_states[i] = retry_on_oom(
-                upscale_and_rearrange,
-                debug=getattr(self, 'debug', None),
-                operation_name="Upsample3D.upscale_conv"
+            temp = self.upscale_conv(hidden_states[i])
+            hidden_states[i] = rearrange(
+                temp,
+                "b (x y z c) f h w -> b c (f z) (h x) (w y)",
+                x=self.spatial_ratio,
+                y=self.spatial_ratio,
+                z=self.temporal_ratio,
             )
 
         # [Overridden] For causal temporal conv
@@ -156,17 +148,10 @@ class Upsample3D(Upsample2D):
             hidden_states = hidden_states[0]
 
         if self.use_conv:
-            def apply_conv():
-                if self.name == "conv":
-                    return self.conv(hidden_states, memory_state=memory_state)
-                else:
-                    return self.Conv2d_0(hidden_states, memory_state=memory_state)
-            
-            hidden_states = retry_on_oom(
-                apply_conv,
-                debug=getattr(self, 'debug', None),
-                operation_name="Upsample3D.conv"
-            )
+            if self.name == "conv":
+                hidden_states = self.conv(hidden_states, memory_state=memory_state)
+            else:
+                hidden_states = self.Conv2d_0(hidden_states, memory_state=memory_state)
 
         if not self.slicing:
             return hidden_states
@@ -314,12 +299,7 @@ class ResnetBlock3D(ResnetBlock2D):
         hidden_states = input_tensor
 
         hidden_states = causal_norm_wrapper(self.norm1, hidden_states)
-        hidden_states = retry_on_oom(
-            self.nonlinearity,
-            hidden_states,
-            debug=getattr(self, 'debug', None),
-            operation_name="ResnetBlock3D.nonlinearity"
-        )
+        hidden_states = self.nonlinearity(hidden_states)
 
         if self.upsample is not None:
             # upsample_nearest_nhwc fails with large batch sizes.
