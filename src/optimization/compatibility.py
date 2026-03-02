@@ -317,6 +317,18 @@ def call_flash_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, 
         max_seqlen_q = int(max_seqlen_q.item())
     if torch.is_tensor(max_seqlen_k):
         max_seqlen_k = int(max_seqlen_k.item())
+
+    # Ensure contiguity and types (stricter requirements for AMD ROCm / composable_kernel backend)
+    if os.environ.get("SEEDVR2_FORCE_CONTIGUOUS", "0") == "1":
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+    # cu_seqlens must always be int32 for C++ APIs (virtually 0 memory overhead)
+    if cu_seqlens_q.dtype != torch.int32:
+        cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32)
+    if cu_seqlens_k.dtype != torch.int32:
+        cu_seqlens_k = cu_seqlens_k.to(dtype=torch.int32)
     
     return flash_attn_2_varlen_func(
         q=q,
@@ -365,6 +377,18 @@ def call_flash_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, 
         max_seqlen_q = int(max_seqlen_q.item())
     if torch.is_tensor(max_seqlen_k):
         max_seqlen_k = int(max_seqlen_k.item())
+
+    # Ensure contiguity and types (stricter requirements for AMD ROCm / composable_kernel backend)
+    if os.environ.get("SEEDVR2_FORCE_CONTIGUOUS", "0") == "1":
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+    # cu_seqlens must always be int32 for C++ APIs (virtually 0 memory overhead)
+    if cu_seqlens_q.dtype != torch.int32:
+        cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32)
+    if cu_seqlens_k.dtype != torch.int32:
+        cu_seqlens_k = cu_seqlens_k.to(dtype=torch.int32)
     
     # FA3 doesn't support dropout_p and window_size - filter them out
     fa3_kwargs = {key: val for key, val in kwargs.items() if key not in ('dropout_p', 'window_size')}
@@ -418,6 +442,18 @@ def call_sage_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
         max_seqlen_q = int(max_seqlen_q.item())
     if torch.is_tensor(max_seqlen_k):
         max_seqlen_k = int(max_seqlen_k.item())
+
+    # Ensure contiguity and types (stricter requirements for AMD ROCm / composable_kernel backend)
+    if os.environ.get("SEEDVR2_FORCE_CONTIGUOUS", "0") == "1":
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+    # cu_seqlens must always be int32 for C++ APIs (virtually 0 memory overhead)
+    if cu_seqlens_q.dtype != torch.int32:
+        cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32)
+    if cu_seqlens_k.dtype != torch.int32:
+        cu_seqlens_k = cu_seqlens_k.to(dtype=torch.int32)
     
     # SageAttention requires half precision (fp16/bf16)
     out_dtype = q.dtype
@@ -640,6 +676,14 @@ def _check_conv3d_memory_bug():
 NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = _check_conv3d_memory_bug()
 
 
+# Auto-tune convolutions for better performance (especially critical for AMD ROCm/MIOpen
+# to prevent catastrophic fallback to reference kernels on non-power-of-2 3D convs)
+if hasattr(torch, 'backends') and hasattr(torch.backends, 'cudnn'):
+    if not torch.backends.cudnn.benchmark:
+        torch.backends.cudnn.benchmark = True
+        # Note: This affects both NVIDIA (cuDNN) and AMD (MIOpen, where cudnn is mapped to MIOpen)
+        # It adds a small overhead to the first batch but massively speeds up subsequent identical batches.
+
 # Log all optimization status once globally (cross-process) using environment variable
 if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     os.environ["SEEDVR2_OPTIMIZATIONS_LOGGED"] = "1"
@@ -678,6 +722,9 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
         torch_ver = torch.__version__.split('+')[0]
         cudnn_ver = torch.backends.cudnn.version()
         print(f"🔧 Conv3d workaround active: PyTorch {torch_ver}, cuDNN {cudnn_ver} (fixing VAE 3x memory bug)")
+
+    if hasattr(torch, 'backends') and hasattr(torch.backends, 'cudnn') and torch.backends.cudnn.benchmark:
+        print("🏎️  Convolution auto-tuning enabled (cudnn.benchmark=True)")
 
 
 # Bfloat16 CUBLAS support

@@ -1710,4 +1710,3 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         for m in self.modules():
             if isinstance(m, InflatedCausalConv3d):
                 m.set_memory_limit(conv_max_mem if conv_max_mem is not None else float("inf"))
-                
