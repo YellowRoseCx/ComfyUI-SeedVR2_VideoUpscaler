@@ -172,10 +172,10 @@ except (ImportError, AttributeError, OSError):
 SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
 
 # 5. Sparse Sage Attention
-sparse_sageattn = None
+spas_sage2_attn_meansim_topk_cuda = None
 SPARSE_SAGE_AVAILABLE = False
 try:
-    from ..models.sparse_sage.core import sparse_sageattn
+    from ..models.sparse_sage.core import spas_sage2_attn_meansim_topk_cuda
     SPARSE_SAGE_AVAILABLE = True
 except Exception:
     # Catch all exceptions (including RuntimeError from triton.jit on unsupported hardware)
@@ -589,13 +589,30 @@ def call_sparse_sage_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
 
     output_splits = []
     for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
-        # reshape to (1, seq, heads, dim) for HND layout which is default or "NHD"
-        q_i = q_i.unsqueeze(0)  # (1, seq, heads, dim)
-        k_i = k_i.unsqueeze(0)
-        v_i = v_i.unsqueeze(0)
+        # SpargeAttn requires seq_len >= 128 and q_len == kv_len.
+        q_len = q_i.size(0)
+        k_len = k_i.size(0)
 
-        out_i = sparse_sageattn(q_i, k_i, v_i, is_causal=is_causal, tensor_layout="NHD")
-        output_splits.append(out_i.squeeze(0))
+        if q_len < 128 or k_len < 128 or q_len != k_len:
+            # Fall back to SDPA for short or differing-length sequences
+            q_i = q_i.permute(1, 0, 2).unsqueeze(0) # (1, heads, seq, dim)
+            k_i = k_i.permute(1, 0, 2).unsqueeze(0)
+            v_i = v_i.permute(1, 0, 2).unsqueeze(0)
+            out_i = F.scaled_dot_product_attention(
+                q_i, k_i, v_i,
+                dropout_p=kwargs.get("dropout_p", 0.0) if not kwargs.get("deterministic", False) else 0.0,
+                is_causal=is_causal
+            )
+            out_i = out_i.squeeze(0).permute(1, 0, 2)
+            output_splits.append(out_i)
+        else:
+            # reshape to (1, seq, heads, dim) for HND layout which is default or "NHD"
+            q_i = q_i.unsqueeze(0)  # (1, seq, heads, dim)
+            k_i = k_i.unsqueeze(0)
+            v_i = v_i.unsqueeze(0)
+
+            out_i = spas_sage2_attn_meansim_topk_cuda(q_i, k_i, v_i, is_causal=is_causal, tensor_layout="NHD")
+            output_splits.append(out_i.squeeze(0))
 
     return torch.cat(output_splits, dim=0).to(out_dtype)
 

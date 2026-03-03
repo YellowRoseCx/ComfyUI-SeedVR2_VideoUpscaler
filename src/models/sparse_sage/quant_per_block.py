@@ -1,5 +1,5 @@
 """
-Copyright (c) 2024 by SageAttention team.
+Copyright (c) 2025 by SpargeAttn team.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,18 +40,17 @@ def quant_per_block_int8_kernel(Input, Output, Scale, L,
     x = x.to(tl.float32)
     x *= sm_scale
     scale = tl.max(tl.abs(x)) / 127.
+    scale += 0.0000001
     x_int8 = x / scale
     x_int8 += 0.5 * tl.where(x_int8 >= 0, 1, -1)
     x_int8 = x_int8.to(tl.int8)
     tl.store(output_ptrs, x_int8, mask=offs_n[:, None] < L)
     tl.store(scale_ptrs, scale)
 
-def per_block_int8(q, k, km=None, BLKQ=128, BLKK=64, sm_scale=None, tensor_layout="HND"):
+
+def per_block_int8(q, k, BLKQ=128, BLKK=64, sm_scale=None, tensor_layout="HND"):
     q_int8 = torch.empty(q.shape, dtype=torch.int8, device=q.device)
     k_int8 = torch.empty(k.shape, dtype=torch.int8, device=k.device)
-
-    if km is not None:
-        k = k - km
 
     if tensor_layout == "HND":
         b, h_qo, qo_len, head_dim = q.shape
@@ -72,8 +71,8 @@ def per_block_int8(q, k, km=None, BLKQ=128, BLKK=64, sm_scale=None, tensor_layou
     else:
         raise ValueError(f"Unknown tensor layout: {tensor_layout}")
 
-    q_scale = torch.empty((b, h_qo, (qo_len + BLKQ - 1) // BLKQ), device=q.device, dtype=torch.float32)
-    k_scale = torch.empty((b, h_kv, (kv_len + BLKK - 1) // BLKK), device=q.device, dtype=torch.float32)
+    q_scale = torch.empty((b, h_qo, (qo_len + BLKQ - 1) // BLKQ, 1), device=q.device, dtype=torch.float32)
+    k_scale = torch.empty((b, h_kv, (kv_len + BLKK - 1) // BLKK, 1), device=q.device, dtype=torch.float32)
 
     if sm_scale is None:
         sm_scale = head_dim**-0.5
@@ -96,6 +95,54 @@ def per_block_int8(q, k, km=None, BLKQ=128, BLKK=64, sm_scale=None, tensor_layou
         k_scale.stride(0), k_scale.stride(1),
         sm_scale=1.0,
         C=head_dim, BLK=BLKK
+    )
+
+    return q_int8, q_scale, k_int8, k_scale
+
+def per_warp_int8(q, k, BLKQ=128, WARPQ=32, BLKK=64, WARPK=64, tensor_layout="HND"):
+    q_int8 = torch.empty(q.shape, dtype=torch.int8, device=q.device)
+    k_int8 = torch.empty(k.shape, dtype=torch.int8, device=k.device)
+
+    if tensor_layout == "HND":
+        b, h_qo, qo_len, head_dim = q.shape
+        _, h_kv, kv_len, _ = k.shape
+
+        stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(1), q.stride(2)
+        stride_bz_qo, stride_h_qo, stride_seq_qo = q_int8.stride(0), q_int8.stride(1), q_int8.stride(2)
+        stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(1), k.stride(2)
+        stride_bz_ko, stride_h_ko, stride_seq_ko = k_int8.stride(0), k_int8.stride(1), k_int8.stride(2)
+    elif tensor_layout == "NHD":
+        b, qo_len, h_qo, head_dim = q.shape
+        _, kv_len, h_kv, _ = k.shape
+
+        stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(2), q.stride(1)
+        stride_bz_qo, stride_h_qo, stride_seq_qo = q_int8.stride(0), q_int8.stride(2), q_int8.stride(1)
+        stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(2), k.stride(1)
+        stride_bz_ko, stride_h_ko, stride_seq_ko = k_int8.stride(0), k_int8.stride(2), k_int8.stride(1)
+    else:
+        raise ValueError(f"Unknown tensor layout: {tensor_layout}")
+
+    q_scale = torch.empty((b, h_qo, (qo_len + BLKQ - 1) // BLKQ * (BLKQ // WARPQ), 1), device=q.device, dtype=torch.float32)
+    k_scale = torch.empty((b, h_kv, (kv_len + BLKK - 1) // BLKK * (BLKK // WARPK), 1), device=q.device, dtype=torch.float32)
+
+    grid = ((qo_len + BLKQ - 1) // BLKQ * (BLKQ // WARPQ), h_qo, b)
+    quant_per_block_int8_kernel[grid](
+        q, q_int8, q_scale, qo_len,
+        stride_bz_q, stride_h_q, stride_seq_q,
+        stride_bz_qo, stride_h_qo, stride_seq_qo,
+        q_scale.stride(0), q_scale.stride(1),
+        sm_scale=1.0,
+        C=head_dim, BLK=WARPQ
+    )
+
+    grid = ((kv_len + BLKK - 1) // BLKK * (BLKK // WARPK), h_kv, b)
+    quant_per_block_int8_kernel[grid](
+        k, k_int8, k_scale, kv_len,
+        stride_bz_k, stride_h_k, stride_seq_k,
+        stride_bz_ko, stride_h_ko, stride_seq_ko,
+        k_scale.stride(0), k_scale.stride(1),
+        sm_scale=1.0,
+        C=head_dim, BLK=WARPK
     )
 
     return q_int8, q_scale, k_int8, k_scale
