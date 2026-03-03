@@ -171,6 +171,16 @@ except (ImportError, AttributeError, OSError):
 
 SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
 
+# 5. Sparse Sage Attention
+sparse_sageattn = None
+SPARSE_SAGE_AVAILABLE = False
+try:
+    from ..models.sparse_sage.core import sparse_sageattn
+    SPARSE_SAGE_AVAILABLE = True
+except (ImportError, AttributeError, OSError):
+    pass
+
+
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
     """
@@ -184,6 +194,19 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
         Validated mode that is available
     """
     # Flash Attention 3
+
+    # Sparse Sage Attention
+    if requested_mode == 'sparse_sage':
+        if SPARSE_SAGE_AVAILABLE:
+            return requested_mode
+        error_msg = (
+            "Cannot use 'sparse_sage' attention mode: Sparse SageAttention is not available.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+
     if requested_mode == 'flash_attn_3':
         if FLASH_ATTN_3_AVAILABLE:
             return requested_mode
@@ -543,6 +566,37 @@ def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
     out = out.transpose(1, 2).reshape(-1, heads, dim).contiguous()
     
     return out.to(out_dtype) if out.dtype != out_dtype else out
+
+
+
+@torch._dynamo.disable
+def call_sparse_sage_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for Sparse SageAttention.
+    """
+    if not SPARSE_SAGE_AVAILABLE:
+        raise ImportError("Sparse SageAttention is not available")
+
+    # Needs to process one batch at a time or reshape properly.
+    # We will use the pytorch_varlen_attention style splitting here to use sparse_sageattn natively per sequence.
+    q_splits = list(torch.tensor_split(q, cu_seqlens_q[1:-1].long().cpu(), dim=0))
+    k_splits = list(torch.tensor_split(k, cu_seqlens_k[1:-1].long().cpu(), dim=0))
+    v_splits = list(torch.tensor_split(v, cu_seqlens_k[1:-1].long().cpu(), dim=0))
+
+    out_dtype = q.dtype
+    is_causal = kwargs.get('causal', False)
+
+    output_splits = []
+    for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
+        # reshape to (1, seq, heads, dim) for HND layout which is default or "NHD"
+        q_i = q_i.unsqueeze(0)  # (1, seq, heads, dim)
+        k_i = k_i.unsqueeze(0)
+        v_i = v_i.unsqueeze(0)
+
+        out_i = sparse_sageattn(q_i, k_i, v_i, is_causal=is_causal, tensor_layout="NHD")
+        output_splits.append(out_i.squeeze(0))
+
+    return torch.cat(output_splits, dim=0).to(out_dtype)
 
 
 # 2. Triton - Required for torch.compile with inductor backend
