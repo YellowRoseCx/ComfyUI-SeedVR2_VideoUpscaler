@@ -51,7 +51,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                 ),
                 io.Combo.Input("device",
                     options=devices,
-                    default=devices[0],
+                    default=devices[0] if devices else "cpu",
                     tooltip="GPU device for DiT model inference (upscaling phase)"
                 ),
                 io.Int.Input("blocks_to_swap",

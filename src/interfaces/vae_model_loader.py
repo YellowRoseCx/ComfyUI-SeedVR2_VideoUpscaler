@@ -52,7 +52,7 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
                 ),
                 io.Combo.Input("device",
                     options=devices,
-                    default=devices[0],
+                    default=devices[0] if devices else "cpu",
                     tooltip="GPU device for VAE model inference (encoding/decoding phases)"
                 ),
                 io.Boolean.Input("encode_tiled",

@@ -177,7 +177,8 @@ SPARSE_SAGE_AVAILABLE = False
 try:
     from ..models.sparse_sage.core import sparse_sageattn
     SPARSE_SAGE_AVAILABLE = True
-except (ImportError, AttributeError, OSError):
+except Exception:
+    # Catch all exceptions (including RuntimeError from triton.jit on unsupported hardware)
     pass
 
 
