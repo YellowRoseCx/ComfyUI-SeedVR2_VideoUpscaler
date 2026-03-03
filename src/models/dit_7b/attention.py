@@ -88,7 +88,8 @@ class FlashAttentionVarlen(nn.Module):
     - flash_attn_3: Flash Attention 3 (Hopper+)
     - sageattn_2: SageAttention 2
     - sageattn_3: SageAttention 3 (Blackwell/RTX 50xx)
-    - sparse_sage: Sparse SageAttention
+    - sparse_sage: Sparse SageAttention (Legacy)
+    - sparge_attn: SpargeAttn (Sage Attention 2 natively sparse)
     
     All non-SDPA backends use @torch._dynamo.disable wrapper (C++ extensions).
     """
@@ -98,7 +99,7 @@ class FlashAttentionVarlen(nn.Module):
         Initialize with specified attention backend.
         
         Args:
-            attention_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3', or 'sparse_sage'
+            attention_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', 'sageattn_3', 'sparse_sage', or 'sparge_attn'
             compute_dtype: Compute dtype for attention (set by pipeline, defaults to None for auto-detection)
         """
         super().__init__()
@@ -142,7 +143,7 @@ class FlashAttentionVarlen(nn.Module):
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k, **kwargs
             )
-        elif self.attention_mode == 'sparse_sage':
+        elif self.attention_mode == 'sparse_sage' or self.attention_mode == 'sparge_attn':
             return call_sparse_sage_varlen(
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
                 max_seqlen_q, max_seqlen_k, **kwargs

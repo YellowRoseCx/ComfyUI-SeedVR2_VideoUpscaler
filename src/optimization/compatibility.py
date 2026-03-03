@@ -197,11 +197,11 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
     # Flash Attention 3
 
     # Sparse Sage Attention
-    if requested_mode == 'sparse_sage':
+    if requested_mode in ['sparse_sage', 'sparge_attn']:
         if SPARSE_SAGE_AVAILABLE:
             return requested_mode
         error_msg = (
-            "Cannot use 'sparse_sage' attention mode: Sparse SageAttention is not available.\n"
+            f"Cannot use '{requested_mode}' attention mode: Sparse SageAttention is not available.\n"
             "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
         )
         if debug:
