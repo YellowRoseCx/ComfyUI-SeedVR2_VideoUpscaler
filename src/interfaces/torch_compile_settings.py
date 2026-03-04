@@ -5,6 +5,17 @@ Configure torch.compile optimization for DiT and VAE models
 
 from comfy_api.latest import io
 from typing import Dict, Any, Tuple
+from functools import partial
+
+torch_mgx = False
+try:
+    import torch_migraphx
+    from torch_migraphx.dynamo import migraphx_backend, migraphx_aot_backend
+    print("Torch_MiGraphX available.")
+    torch_mgx = True
+except ImportError as e:
+    print(f"Torch_MiGraphX not available: {e}")
+
 
 
 class SeedVR2TorchCompileSettings(io.ComfyNode):
@@ -12,6 +23,10 @@ class SeedVR2TorchCompileSettings(io.ComfyNode):
     
     @classmethod
     def define_schema(cls) -> io.Schema:
+        backend_options = ["inductor", "cudagraphs"]
+        if torch_mgx:
+            backend_options.extend(["migraphx", "migraphx_aot"])
+
         return io.Schema(
             node_id="SeedVR2TorchCompileSettings",
             display_name="SeedVR2 Torch Compile Settings",
@@ -23,12 +38,14 @@ class SeedVR2TorchCompileSettings(io.ComfyNode):
             ),
             inputs=[
                 io.Combo.Input("backend", 
-                    options=["inductor", "cudagraphs"],
+                    options=backend_options,
                     default="inductor",
                     tooltip=(
                         "Compilation backend:\n"
                         "• inductor: Full optimization with Triton kernel generation and fusion (recommended)\n"
-                        "• cudagraphs: Lightweight wrapper using CUDA graphs, no kernel optimization"
+                        "• cudagraphs: Lightweight wrapper using CUDA graphs, no kernel optimization\n"
+                        "• migraphx: Optimize with ROCm torch_migraphx backend\n"
+                        "• migraphx_aot: Optimize with ROCm torch_migraphx backend (AOT compiled)"
                     )
                 ),
                 io.Combo.Input("mode",
@@ -85,6 +102,26 @@ class SeedVR2TorchCompileSettings(io.ComfyNode):
                         "Only increase if you see 'hit config.recompile_limit' warnings and have bounded shape variations."
                     )
                 ),
+                io.Boolean.Input("mgx_fp16",
+                    default=True,
+                    tooltip="MIGraphX parameter: fp16 quantize (default: True). Only used if backend is migraphx or migraphx_aot."
+                ),
+                io.Boolean.Input("mgx_bf16",
+                    default=False,
+                    tooltip="MIGraphX parameter: bf16 quantize (default: False). Only used if backend is migraphx or migraphx_aot."
+                ),
+                io.Boolean.Input("mgx_exhaustive_tune",
+                    default=False,
+                    tooltip="MIGraphX parameter: Perform exhaustive tune (default: False). Only used if backend is migraphx or migraphx_aot."
+                ),
+                io.Boolean.Input("mgx_save_mxr",
+                    default=False,
+                    tooltip="MIGraphX parameter: Save compiled MXR file (default: False). Only used if backend is migraphx or migraphx_aot."
+                ),
+                io.Boolean.Input("mgx_deallocate",
+                    default=True,
+                    tooltip="MIGraphX parameter: Enable memory deallocation (default: True). Only used if backend is migraphx or migraphx_aot."
+                ),
             ],
             outputs=[
                 io.Custom("TORCH_COMPILE_ARGS").Output(
@@ -95,21 +132,40 @@ class SeedVR2TorchCompileSettings(io.ComfyNode):
     
     @classmethod
     def execute(cls, backend: str, mode: str, fullgraph: bool, dynamic: bool, 
-                   dynamo_cache_size_limit: int, dynamo_recompile_limit: int) -> io.NodeOutput:
+                   dynamo_cache_size_limit: int, dynamo_recompile_limit: int,
+                   mgx_fp16: bool, mgx_bf16: bool, mgx_exhaustive_tune: bool,
+                   mgx_save_mxr: bool, mgx_deallocate: bool) -> io.NodeOutput:
         """
         Create torch.compile configuration for model optimization
         
         Args:
-            backend: Compilation backend ("inductor" or "cudagraphs")
+            backend: Compilation backend ("inductor", "cudagraphs", "migraphx", etc.)
             mode: Optimization mode ("default", "reduce-overhead", "max-autotune", etc.)
             fullgraph: Whether to compile entire model as single graph
             dynamic: Whether to handle varying input shapes without recompilation
             dynamo_cache_size_limit: Maximum cached compiled versions per function
             dynamo_recompile_limit: Maximum recompilation attempts before fallback
+            mgx_fp16: MIGraphX fp16 quantize
+            mgx_bf16: MIGraphX bf16 quantize
+            mgx_exhaustive_tune: MIGraphX exhaustive tune
+            mgx_save_mxr: MIGraphX save mxr file
+            mgx_deallocate: MIGraphX deallocate
             
         Returns:
             NodeOutput containing torch.compile configuration dictionary
         """
+        if torch_mgx:
+            if backend == "migraphx":
+                mode = None
+                backend = partial(migraphx_backend, fp16=mgx_fp16, bf16=mgx_bf16,
+                                  exhaustive_tune=mgx_exhaustive_tune, save_mxr=mgx_save_mxr,
+                                  deallocate=mgx_deallocate)
+            elif backend == "migraphx_aot":
+                mode = None
+                backend = partial(migraphx_aot_backend, fp16=mgx_fp16, bf16=mgx_bf16,
+                                  exhaustive_tune=mgx_exhaustive_tune, save_mxr=mgx_save_mxr,
+                                  deallocate=mgx_deallocate)
+
         compile_args = {
             "backend": backend,
             "mode": mode,
