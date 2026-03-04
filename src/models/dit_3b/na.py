@@ -130,14 +130,13 @@ def unflatten(
     hid_list = _tensor_split(hid, hid_len, dim=0)
     
     # Unflatten each piece
-    # NOTE: .cpu().numpy() is required for torch.compile compatibility
-    # .tolist() would fail with symbolic shapes during compilation
     result = []
     for i, x in enumerate(hid_list):
         shape = hid_shape[i]
-        # Must use .cpu().numpy() for compilation compatibility
-        # Shape tensors are small, so CPU transfer overhead is minimal
-        target_shape = list(shape.cpu().numpy())
+        # Use .tolist() so Dynamo can statically trace the exact dimensions
+        # without triggering a data-dependent aten._local_scalar_dense graph break
+        # when fullgraph=True and dynamic=False.
+        target_shape = shape.tolist()
         result.append(x.unflatten(0, target_shape))
     
     return result
