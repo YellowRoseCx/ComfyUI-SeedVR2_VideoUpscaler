@@ -673,8 +673,15 @@ def _check_conv3d_memory_bug():
     """
     try:
         # Exclude AMD ROCm/HIP builds (they use MIOpen, not cuDNN)
-        if hasattr(torch.version, 'hip') and torch.version.hip is not None:
+        # Handle custom PyTorch ROCm builds where .hip might be empty string or different format
+        if hasattr(torch.version, 'hip') and str(torch.version.hip).strip() != 'None':
             return False
+
+        # Also check device name just in case it's a completely custom build
+        if hasattr(torch, 'cuda') and torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0).lower()
+            if 'amd' in device_name or 'radeon' in device_name or 'mi' in device_name:
+                return False
         
         # Must have CUDA available
         if not (hasattr(torch, 'cuda') and torch.cuda.is_available()):

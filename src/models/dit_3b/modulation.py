@@ -80,7 +80,10 @@ class AdaSingle(nn.Module):
             emb = cache(
                 f"emb_repeat_{idx}_{branch_tag}",
                 lambda: slice_inputs(
-                    torch.repeat_interleave(emb, hid_len, dim=0),
+                    # Use .tolist() to statically evaluate the lengths, then wrap back in a
+                    # tensor so PyTorch eager execution doesn't crash (expects Tensor or int).
+                    # Dynamo treats the wrapped result as a static constant, preventing graph breaks.
+                    torch.repeat_interleave(emb, torch.tensor(hid_len.tolist(), device=emb.device), dim=0),
                     dim=0,
                 ),
             )
