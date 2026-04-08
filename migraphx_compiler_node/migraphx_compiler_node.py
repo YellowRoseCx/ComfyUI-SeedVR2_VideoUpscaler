@@ -5,6 +5,7 @@ Generic Torch Compile Node with MIGraphX Support for ComfyUI
 import torch
 from comfy_api.latest import io
 from functools import partial
+from typing import Any
 
 # Conditionally import torch_migraphx
 torch_mgx = False
@@ -39,7 +40,7 @@ class GenericTorchCompileMIGraphX(io.ComfyNode):
                 "on ROCm platforms, alongside standard Inductor/CUDAGraphs backends."
             ),
             inputs=[
-                io.Custom("MODEL").Input(
+                io.Custom("MODEL").Input("model",
                     tooltip="The PyTorch model to compile."
                 ),
                 io.Combo.Input("backend",
@@ -98,7 +99,7 @@ class GenericTorchCompileMIGraphX(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model: torch.nn.Module, backend: str, fullgraph: bool, dynamic: bool,
+    def execute(cls, model: Any, backend: str, fullgraph: bool, dynamic: bool,
                 mgx_fp16: bool, mgx_bf16: bool, mgx_exhaustive_tune: bool,
                 mgx_save_mxr: bool, mgx_deallocate: bool) -> io.NodeOutput:
         """
@@ -131,21 +132,39 @@ class GenericTorchCompileMIGraphX(io.ComfyNode):
 
         print(f"Compiling model with backend: {backend}, fullgraph={fullgraph}, dynamic={dynamic}")
 
-        # In case the backend doesn't take 'mode=None' cleanly, we omit mode for migraphx
-        if torch_mgx and backend.startswith("migraphx"):
-            compiled_model = torch.compile(
-                model,
-                backend=compile_backend,
-                fullgraph=fullgraph,
-                dynamic=dynamic
-            )
-        else:
-            compiled_model = torch.compile(
-                model,
-                backend=compile_backend,
-                fullgraph=fullgraph,
-                dynamic=dynamic,
-                mode="default"
-            )
+        # In ComfyUI, 'model' is typically a ModelPatcher.
+        # Modifying `model.model` directly breaks ComfyUI's weight loading/unloading hooks.
+        # Instead, we compile the `forward` pass of the inner model on a cloned patcher.
 
-        return io.NodeOutput(compiled_model)
+        cloned_model = model.clone() if hasattr(model, "clone") else model
+        target_model = getattr(cloned_model, "model", cloned_model)
+
+        # Ensure we compile the actual forward pass or the entire nn.Module without breaking references
+        compile_kwargs = {
+            "backend": compile_backend,
+            "fullgraph": fullgraph,
+            "dynamic": dynamic
+        }
+        if not (torch_mgx and backend.startswith("migraphx")):
+            compile_kwargs["mode"] = "default"
+
+        # Safely patch the model using ComfyUI's native add_object_patch to avoid mutating shared weights
+        if hasattr(cloned_model, "add_object_patch"):
+            # ComfyUI often specifically calls `model.diffusion_model` in its internal samplers
+            if hasattr(target_model, "diffusion_model"):
+                compiled_diff = torch.compile(target_model.diffusion_model, **compile_kwargs)
+                cloned_model.add_object_patch("diffusion_model", compiled_diff)
+
+            # Also patch the forward pass for general models
+            if hasattr(target_model, "forward"):
+                compiled_forward = torch.compile(target_model.forward, **compile_kwargs)
+                cloned_model.add_object_patch("forward", compiled_forward)
+        else:
+            # Fallback if it's not a ModelPatcher
+            compiled_target = torch.compile(target_model, **compile_kwargs)
+            if hasattr(cloned_model, "model"):
+                cloned_model.model = compiled_target
+            else:
+                cloned_model = compiled_target
+
+        return io.NodeOutput(cloned_model)
