@@ -103,40 +103,67 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
     """
     device_str = str(device)
     
-    if checkpoint_path.endswith('.safetensors'):
-        if not SAFETENSORS_AVAILABLE:
-            error_msg = (
-                f"Cannot load {os.path.basename(checkpoint_path)}\n"
-                f"SafeTensors library is required but not installed.\n"
-                f"Please install it with: pip install safetensors"
-            )
-            if debug:
-                debug.log(error_msg, level="ERROR", category="dit", force=True)
-                debug.log("This is a one-time installation that will enable loading of .safetensors files", 
-                         level="INFO", category="info", force=True)
-            raise ImportError(error_msg)
-        
-        # Try direct device loading first (optimal path)
+    if checkpoint_path.endswith('.safetensors') or checkpoint_path.endswith('.pth'):
+        # Try to use ComfyUI's native loader which handles quantization metadata correctly
         try:
-            state = load_safetensors_file(checkpoint_path, device=device_str)
-        except RuntimeError as e:
-            # MPS allocator fallback: some PyTorch/macOS versions have issues with
-            # direct MPS loading (allocation failures, watermark errors, etc.)
-            error_msg = str(e).lower()
-            is_mps_alloc_error = device.type == "mps" and any(
-                keyword in error_msg for keyword in ["watermark", "allocat", "memory"]
-            )
+            import comfy.utils
+            state, metadata = comfy.utils.load_torch_file(checkpoint_path, safe_load=True, return_metadata=True)
+            # This injects .comfy_quant keys from metadata headers if present
+            state, metadata = comfy.utils.convert_old_quants(state, "", metadata=metadata)
             
-            if is_mps_alloc_error:
-                # Transparent fallback - only log if debug enabled
+            # Move to target device if needed
+            if device_str != "cpu":
+                for k in list(state.keys()):
+                    if torch.is_tensor(state[k]):
+                        state[k] = state[k].to(device)
+            return state
+        except ImportError:
+            if debug:
+                debug.log("comfy.utils not found, falling back to basic loader.", category="info")
+            pass # Fallback to standard loading
+        except Exception as e:
+            if debug:
+                debug.log(f"ComfyUI loader failed: {e}, falling back to basic loader.", level="WARNING", category="info")
+            pass
+
+        # Fallback basic loading
+        if checkpoint_path.endswith('.safetensors'):
+            if not SAFETENSORS_AVAILABLE:
+                error_msg = (
+                    f"Cannot load {os.path.basename(checkpoint_path)}\n"
+                    f"SafeTensors library is required but not installed.\n"
+                    f"Please install it with: pip install safetensors"
+                )
                 if debug:
-                    debug.log("Using CPU intermediate loading for MPS compatibility", 
-                            category="info", indent_level=1)
-                state = load_safetensors_file(checkpoint_path, device="cpu")
-                # Tensors will be moved to MPS during model.load_state_dict()
-            else:
-                # Re-raise if it's a different error (file corruption, etc.)
-                raise
+                    debug.log(error_msg, level="ERROR", category="dit", force=True)
+                    debug.log("This is a one-time installation that will enable loading of .safetensors files", 
+                             level="INFO", category="info", force=True)
+                raise ImportError(error_msg)
+            
+            # Try direct device loading first (optimal path)
+            try:
+                state = load_safetensors_file(checkpoint_path, device=device_str)
+            except RuntimeError as e:
+                # MPS allocator fallback: some PyTorch/macOS versions have issues with
+                # direct MPS loading (allocation failures, watermark errors, etc.)
+                error_msg = str(e).lower()
+                is_mps_alloc_error = device.type == "mps" and any(
+                    keyword in error_msg for keyword in ["watermark", "allocat", "memory"]
+                )
+                
+                if is_mps_alloc_error:
+                    # Transparent fallback - only log if debug enabled
+                    if debug:
+                        debug.log("Using CPU intermediate loading for MPS compatibility", 
+                                category="info", indent_level=1)
+                    state = load_safetensors_file(checkpoint_path, device="cpu")
+                    # Tensors will be moved to MPS during model.load_state_dict()
+                else:
+                    # Re-raise if it's a different error (file corruption, etc.)
+                    raise
+        else:
+            state = torch.load(checkpoint_path, map_location=device_str, mmap=True, weights_only=True)
+            
     elif checkpoint_path.endswith('.gguf'):
         validate_gguf_availability(f"load {os.path.basename(checkpoint_path)}", debug)
         state = _load_gguf_state(
@@ -145,10 +172,8 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
                     debug=debug, 
                     handle_prefix="model.diffusion_model."
                 )
-    elif checkpoint_path.endswith('.pth'):
-        state = torch.load(checkpoint_path, map_location=device_str, mmap=True, weights_only=True)
     else:
-        raise ValueError(f"Unsupported checkpoint format. Expected .safetensors or .pth, got: {checkpoint_path}")
+        raise ValueError(f"Unsupported checkpoint format. Expected .safetensors, .pth or .gguf, got: {checkpoint_path}")
     
     return state
 
@@ -815,10 +840,141 @@ def initialize_meta_buffers_impl(model: torch.nn.Module, target_device: torch.de
     return initialized_count
 
 
+def _process_comfy_quantized_state(model: torch.nn.Module, state: Dict[str, torch.Tensor], debug: Optional['Debug'] = None) -> Dict[str, torch.Tensor]:
+    """
+    Process state dict to handle ComfyUI natively quantized weights (e.g. Int4 ConvRot, FP8).
+    Wraps quantized packed weights in comfy_kitchen QuantizedTensor and assigns them directly
+    to bypass PyTorch's shape validation in load_state_dict.
+    """
+    import json
+    try:
+        from comfy.quant_ops import QUANT_ALGOS, get_layout_class, QuantizedTensor
+    except ImportError:
+        if debug:
+            debug.log("comfy.quant_ops not available. Cannot load native ComfyUI quantized weights.", level="WARNING", category="dit", force=True)
+        return state
+
+    quant_keys = [k for k in list(state.keys()) if k.endswith('.comfy_quant')]
+    if not quant_keys:
+        return state
+
+    if debug:
+        debug.log(f"Found {len(quant_keys)} ComfyUI quantized tensors. Applying native ComfyUI quant ops.", category="dit", force=True)
+
+    for quant_key in quant_keys:
+        prefix = quant_key[:-len('comfy_quant')]
+        weight_key = f"{prefix}weight"
+        
+        if weight_key not in state:
+            if debug:
+                debug.log(f"Missing weight for {quant_key}", level="WARNING", category="dit", force=True)
+            continue
+            
+        layer_conf_tensor = state.pop(quant_key)
+        try:
+            if isinstance(layer_conf_tensor, torch.Tensor):
+                layer_conf_bytes = layer_conf_tensor.cpu().numpy().tobytes()
+            else:
+                layer_conf_bytes = bytes(layer_conf_tensor)
+            layer_conf_bytes = layer_conf_bytes.rstrip(b'\x00')
+            layer_conf = json.loads(layer_conf_bytes)
+        except Exception as e:
+            if debug:
+                debug.log(f"Error parsing comfy_quant for {weight_key}: {e}", level="WARNING", category="dit", force=True)
+            continue
+            
+        quant_format = layer_conf.get("format", None)
+        if quant_format not in QUANT_ALGOS:
+            if debug:
+                debug.log(f"Unknown quant format {quant_format} for {weight_key}", level="WARNING", category="dit", force=True)
+            continue
+            
+        qconfig = QUANT_ALGOS[quant_format]
+        layout_type = qconfig.get("comfy_tensor_layout")
+        layout_cls = get_layout_class(layout_type)
+        
+        if not layout_cls:
+            if debug:
+                debug.log(f"Layout class {layout_type} not found. Is comfy_kitchen installed?", level="WARNING", category="dit", force=True)
+            continue
+
+        weight = state.pop(weight_key)
+        
+        # Helper to pop scales to clean state dict and build Layout params
+        def pop_scale(name, dtype=None):
+            k = f"{prefix}{name}"
+            v = state.pop(k, None)
+            if v is not None and dtype is not None:
+                v = v.view(dtype=dtype)
+            return v
+            
+        scales = {}
+        if quant_format in ("float8_e4m3fn", "float8_e5m2"):
+            scales = {"scale": pop_scale("weight_scale")}
+        elif quant_format == "mxfp8":
+            dtype_mxfp8 = getattr(torch, "float8_e8m0fnu", None)
+            scales = {"scale": pop_scale("weight_scale", dtype_mxfp8)}
+        elif quant_format == "nvfp4":
+            ts = pop_scale("weight_scale_2")
+            bs = pop_scale("weight_scale", getattr(torch, "float8_e4m3fn", None))
+            scales = {"scale": ts, "block_scale": bs}
+        elif quant_format == "int8_tensorwise":
+            scales = {"scale": pop_scale("weight_scale")}
+            params_conf = layer_conf.get("params", {})
+            if layer_conf.get("convrot", params_conf.get("convrot", False)):
+                scales["convrot"] = True
+                scales["convrot_groupsize"] = int(layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256)))
+        elif quant_format == "convrot_w4a4":
+            scale = pop_scale("weight_scale")
+            params_conf = layer_conf.get("params", {})
+            if not isinstance(params_conf, dict):
+                params_conf = {}
+            scales = {
+                "scale": scale,
+                "convrot_groupsize": int(layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256))),
+                "quant_group_size": int(layer_conf.get("quant_group_size", params_conf.get("quant_group_size", 64))),
+                "linear_dtype": layer_conf.get("linear_dtype", params_conf.get("linear_dtype", "int4")),
+            }
+        
+        try:
+            module, attr_name = _navigate_to_parameter(model, weight_key)
+            existing_param = getattr(module, attr_name)
+            orig_shape = tuple(existing_param.shape)
+            orig_dtype = existing_param.dtype
+        except AttributeError:
+            if debug:
+                debug.log(f"Warning: {weight_key} not in model, cannot determine original shape", level="WARNING", category="dit")
+            orig_shape = tuple(weight.shape)
+            orig_dtype = torch.float16
+            
+        params = layout_cls.Params(**scales, orig_dtype=orig_dtype, orig_shape=orig_shape)
+        
+        storage_t = qconfig["storage_t"]
+        if weight.dtype != storage_t:
+            weight = weight.to(dtype=storage_t)
+            
+        quantized_weight = QuantizedTensor(weight, layout_type, params)
+        new_param = torch.nn.Parameter(quantized_weight, requires_grad=False)
+        
+        # Direct assignment to bypass load_state_dict shape check
+        try:
+            module, attr_name = _navigate_to_parameter(model, weight_key)
+            setattr(module, attr_name, new_param)
+        except AttributeError as e:
+            if debug:
+                debug.log(f"Failed to set parameter {weight_key}: {e}", level="WARNING", category="dit")
+        
+    return state
+
+
 def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor], 
                           used_meta: bool, model_type: str, model_type_lower: str,
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
+    
+    # Process any ComfyUI native quantized weights (e.g. Int4 ConvRot, FP8, NVFP4)
+    state = _process_comfy_quantized_state(model, state, debug)
+    
     debug.start_timer(f"{model_type_lower}_state_apply")
     model.load_state_dict(state, strict=False, assign=True)
     
