@@ -167,12 +167,11 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, model: str, device: str, image_fast_vae_patch: bool = True,
-                     offload_device: str = "none",
-                     cache_model: bool = False, encode_tiled: bool = False,
-                     encode_tile_size: int = 1024, encode_tile_overlap: int = 128,
-                     decode_tiled: bool = False, decode_tile_size: int = 1024,
-                     decode_tile_overlap: int = 128, tile_debug: str = "false",
+    def execute(cls, model: str, image_fast_vae_patch: bool = True,
+                     device: str = "cpu",
+                     encode_tiled: bool = False, encode_tile_size: int = 1024, encode_tile_overlap: int = 128,
+                     decode_tiled: bool = False, decode_tile_size: int = 1024, decode_tile_overlap: int = 128,
+                     tile_debug: str = "false", offload_device: str = "none", cache_model: bool = False,
                      torch_compile_args: Dict[str, Any] = None
                      ) -> io.NodeOutput:
         """
