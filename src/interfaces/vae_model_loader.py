@@ -170,9 +170,9 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
     def execute(cls, model: str, device: str, image_fast_vae_patch: bool = True,
                      offload_device: str = "none",
                      cache_model: bool = False, encode_tiled: bool = False,
-                     encode_tile_size: int = 512, encode_tile_overlap: int = 64,
-                     decode_tiled: bool = False, decode_tile_size: int = 512, 
-                     decode_tile_overlap: int = 64, tile_debug: str = "false",
+                     encode_tile_size: int = 1024, encode_tile_overlap: int = 128,
+                     decode_tiled: bool = False, decode_tile_size: int = 1024,
+                     decode_tile_overlap: int = 128, tile_debug: str = "false",
                      torch_compile_args: Dict[str, Any] = None
                      ) -> io.NodeOutput:
         """
@@ -211,10 +211,15 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
             # Match ReadMe instructions to override to 512px or 256px
             encode_tile_size = 256 if encode_tile_size <= 256 else 512
             decode_tile_size = 256 if decode_tile_size <= 256 else 512
+            # Also adjust overlap to be proportional to avoid NaN or weird artifacts
+            encode_tile_overlap = min(encode_tile_overlap, encode_tile_size // 4)
+            decode_tile_overlap = min(decode_tile_overlap, decode_tile_size // 4)
         else:
             # Default to 1024 if not explicitly provided or default
             if not encode_tile_size: encode_tile_size = 1024
             if not decode_tile_size: decode_tile_size = 1024
+            if not encode_tile_overlap: encode_tile_overlap = 128
+            if not decode_tile_overlap: decode_tile_overlap = 128
         
         config = {
             "model": model,
