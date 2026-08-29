@@ -32,8 +32,8 @@ def apply_fast_vae_patch(enable=True):
     import torch.nn.functional as F
     import math
     import logging
-    from src.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
-    from src.models.video_vae_v3.modules.types import MemoryState
+    from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
+    from ..models.video_vae_v3.modules.types import MemoryState
 
     log = logging.getLogger(__name__)
 
