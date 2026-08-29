@@ -28,6 +28,7 @@ from ..optimization.memory_manager import (
     complete_cleanup,
     get_device_list
 )
+from ..optimization.fast_vae_hook import apply_fast_vae_patch
 
 # Import ComfyUI progress reporting
 try:
@@ -338,6 +339,10 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
         vae_device = torch.device(vae["device"])
         dit_id = dit["node_id"]
         vae_id = vae["node_id"]
+
+        # Apply or remove fast VAE patch based on configuration
+        image_fast_vae_patch = vae.get("image_fast_vae_patch", False)
+        apply_fast_vae_patch(enable=image_fast_vae_patch)
 
         # OPTIONAL inputs - use .get() with defaults
         dit_cache = dit.get("cache_model", False)

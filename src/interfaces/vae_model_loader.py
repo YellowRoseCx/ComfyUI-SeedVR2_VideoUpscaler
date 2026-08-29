@@ -50,6 +50,11 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
                         "Additional models can be added to the ComfyUI models folder."
                     )
                 ),
+                io.Boolean.Input("image_fast_vae_patch",
+                    default=True,
+                    tooltip=("Enable Image Fast VAE Patch for decoding single images.\n" "Significantly reduces memory usage and speeds up processing.\n" "Overrides encode/decode tile sizes to 512 (or 256 if requested).")
+                ),
+
                 io.Combo.Input("device",
                     options=devices,
                     default=devices[0] if devices else "cpu",
@@ -162,7 +167,8 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
         )
     
     @classmethod
-    def execute(cls, model: str, device: str, offload_device: str = "none",
+    def execute(cls, model: str, device: str, image_fast_vae_patch: bool = True,
+                     offload_device: str = "none",
                      cache_model: bool = False, encode_tiled: bool = False,
                      encode_tile_size: int = 512, encode_tile_overlap: int = 64,
                      decode_tiled: bool = False, decode_tile_size: int = 512, 
@@ -200,10 +206,20 @@ class SeedVR2LoadVAEModel(io.ComfyNode):
                 "Please set offload_device to specify where the cached VAE model should be stored "
                 "(e.g., 'cpu' or another device). Set cache_model=False if you don't want to cache the model."
             )
+
+        if image_fast_vae_patch:
+            # Match ReadMe instructions to override to 512px or 256px
+            encode_tile_size = 256 if encode_tile_size <= 256 else 512
+            decode_tile_size = 256 if decode_tile_size <= 256 else 512
+        else:
+            # Default to 1024 if not explicitly provided or default
+            if not encode_tile_size: encode_tile_size = 1024
+            if not decode_tile_size: decode_tile_size = 1024
         
         config = {
             "model": model,
             "device": device,
+            "image_fast_vae_patch": image_fast_vae_patch,
             "offload_device": offload_device,
             "cache_model": cache_model,
             "encode_tiled": encode_tiled,
